@@ -40,15 +40,18 @@ Uses LLM-powered contrapositive logic to find covering portfolios. Only logicall
 
 ### 1. Install Skill
 
-Copy the skill to your OpenClaw skills directory:
+**Option A: Install from ClawHub (Recommended)**
+
+```bash
+clawhub install polyclaw
+cd ~/.openclaw/skills/polyclaw
+uv sync
+```
+
+**Option B: Manual install**
 
 ```bash
 cp -r polyclaw ~/.openclaw/skills/
-```
-
-Then install dependencies:
-
-```bash
 cd ~/.openclaw/skills/polyclaw
 uv sync
 ```
