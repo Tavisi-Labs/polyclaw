@@ -1,7 +1,15 @@
-"""OpenRouter LLM client for hedge discovery.
+"""LLM client for hedge discovery.
 
-Async client for calling LLMs via OpenRouter API.
-Used for extracting logical implications between markets.
+This is used for extracting logically necessary implications between markets.
+Default backend: Venice (OpenAI-compatible) using GPT-5.2.
+
+Env:
+- VENICE_API_KEY (required for Venice)
+- VENICE_BASE_URL (optional; default https://api.venice.ai/api/v1)
+- VENICE_MODEL (optional; default openai-gpt-52)
+
+Legacy:
+- OPENROUTER_API_KEY is no longer required when using Venice.
 """
 
 import asyncio
@@ -13,17 +21,11 @@ import httpx
 # CONFIGURATION
 # =============================================================================
 
-OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
-
-# Default model (free tier)
-# Note: Model quality matters - must follow JSON format and reject spurious correlations
-# - DeepSeek R1: Good reasoning but returns empty content (puts answer in reasoning_content)
-# - Gemma: Finds spurious correlations
-# - Nemotron: Correct format and good logical reasoning
-DEFAULT_MODEL = "nvidia/nemotron-nano-9b-v2:free"
+VENICE_BASE_URL = os.getenv("VENICE_BASE_URL", "https://api.venice.ai/api/v1")
+DEFAULT_MODEL = os.getenv("VENICE_MODEL", "openai-gpt-52")
 
 # Request settings
-LLM_TIMEOUT = 60.0
+LLM_TIMEOUT = float(os.getenv("VENICE_TIMEOUT", "60"))
 LLM_MAX_RETRIES = 3
 
 
@@ -33,13 +35,7 @@ LLM_MAX_RETRIES = 3
 
 
 class LLMClient:
-    """
-    Async client for OpenRouter API.
-
-    Used for:
-    - Extracting logical implications between markets
-    - Analyzing market relationships for hedge discovery
-    """
+    """Async client for Venice (OpenAI-compatible) chat completions."""
 
     def __init__(
         self,
@@ -47,16 +43,16 @@ class LLMClient:
         api_key: str | None = None,
         timeout: float = LLM_TIMEOUT,
     ):
-        self.api_key = api_key or os.getenv("OPENROUTER_API_KEY")
+        self.api_key = api_key or os.getenv("VENICE_API_KEY")
         if not self.api_key:
             raise ValueError(
-                "OPENROUTER_API_KEY not set. "
-                "Get a free key at https://openrouter.ai/keys"
+                "VENICE_API_KEY not set. "
+                "Create one and export it (or add it to .env)."
             )
 
         self.model = model
         self.timeout = timeout
-        self.base_url = OPENROUTER_BASE_URL
+        self.base_url = VENICE_BASE_URL
 
         self._client: httpx.AsyncClient | None = None
 
@@ -150,7 +146,7 @@ def get_llm_client(model: str = DEFAULT_MODEL) -> LLMClient:
     Get LLM client singleton.
 
     Args:
-        model: Model identifier from OpenRouter
+        model: Model identifier (Venice/OpenAI-compatible)
 
     Returns:
         LLMClient instance
