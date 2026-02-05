@@ -546,11 +546,23 @@ async def main() -> int:
                                 except Exception:
                                     continue
 
-                                bids = book.get("bids") or []
-                                asks = book.get("asks") or []
+                                # py-clob-client may return a dict or an OrderBookSummary object
+                                def _get_side(ob, side: str):
+                                    if isinstance(ob, dict):
+                                        return ob.get(side) or []
+                                    return getattr(ob, side, None) or []
+
+                                bids = _get_side(book, "bids")
+                                asks = _get_side(book, "asks")
                                 if not asks:
                                     continue
-                                best_ask = float(asks[0]["price"] if isinstance(asks[0], dict) else asks[0][0])
+
+                                first_ask = asks[0]
+                                if isinstance(first_ask, dict):
+                                    best_ask = float(first_ask.get("price"))
+                                else:
+                                    # sometimes tuples/lists
+                                    best_ask = float(first_ask[0])
 
                                 # Probability model upgrade (still deterministic): logistic on lookback return + spread penalty
                                 # Calibrated to be conservative; tune via directives if desired.
