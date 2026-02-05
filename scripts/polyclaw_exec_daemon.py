@@ -560,8 +560,10 @@ async def main() -> int:
                                 first_ask = asks[0]
                                 if isinstance(first_ask, dict):
                                     best_ask = float(first_ask.get("price"))
+                                elif hasattr(first_ask, "price"):
+                                    best_ask = float(getattr(first_ask, "price"))
                                 else:
-                                    # sometimes tuples/lists
+                                    # tuples/lists
                                     best_ask = float(first_ask[0])
 
                                 # Probability model upgrade (still deterministic): logistic on lookback return + spread penalty
