@@ -20,6 +20,7 @@ import signal
 import time
 from dataclasses import dataclass
 from pathlib import Path
+from datetime import datetime, timezone
 
 import httpx
 
@@ -41,6 +42,9 @@ GAMMA_BASE = os.getenv("POLY_GAMMA_BASE_URL", "https://gamma-api.polymarket.com"
 ASSETS = ["BTC", "ETH", "SOL", "XRP"]
 DISCOVERY_INTERVAL_S = int(os.getenv("POLY_15M_DISCOVERY_INTERVAL_S", "30"))
 HEARTBEAT_INTERVAL_S = int(os.getenv("POLY_EXEC_HEARTBEAT_INTERVAL_S", "5"))
+
+# Prefer true 15-minute markets
+TARGET_INTERVAL_S = int(os.getenv("POLY_TARGET_INTERVAL_S", str(15 * 60)))
 
 # Spot aggregation
 SPOT_OUTLIER_PCT = float(os.getenv("SPOT_OUTLIER_PCT", "0.007"))  # 0.7%
@@ -232,17 +236,68 @@ _15m_re = re.compile(r"\b(15\s*-?\s*minute|next\s+15\s+minutes)\b", re.IGNORECAS
 _updown_re = re.compile(r"\b(up\s+or\s+down)\b", re.IGNORECASE)
 
 
+_window_re = re.compile(
+    r"-\s*(?P<mon>[A-Za-z]+)\s+(?P<day>\d{1,2}),\s*"
+    r"(?P<h1>\d{1,2}):(?P<m1>\d{2})(?P<ap1>AM|PM)\s*-\s*"
+    r"(?P<h2>\d{1,2}):(?P<m2>\d{2})(?P<ap2>AM|PM)\s*ET",
+    re.IGNORECASE,
+)
+
+
+def _et_to_utc_epoch(mon: str, day: int, hour: int, minute: int, ap: str, year: int) -> int | None:
+    """Best-effort parse of ET timestamp to UTC epoch seconds.
+
+    Uses a fixed offset approach: ET assumed = UTC-5.
+    Good enough for market selection; if DST matters, this may be off by 1h.
+    """
+    months = {
+        "jan": 1, "january": 1,
+        "feb": 2, "february": 2,
+        "mar": 3, "march": 3,
+        "apr": 4, "april": 4,
+        "may": 5,
+        "jun": 6, "june": 6,
+        "jul": 7, "july": 7,
+        "aug": 8, "august": 8,
+        "sep": 9, "sept": 9, "september": 9,
+        "oct": 10, "october": 10,
+        "nov": 11, "november": 11,
+        "dec": 12, "december": 12,
+    }
+    mnum = months.get(mon.lower())
+    if not mnum:
+        return None
+    h = int(hour) % 12
+    if ap.upper() == "PM":
+        h += 12
+    # ET ~ UTC-5
+    dt_et = datetime(year, mnum, int(day), h, int(minute), tzinfo=timezone.utc)
+    # interpret dt_et as ET by subtracting 5h to get UTC
+    return int((dt_et.timestamp()) + 5 * 3600)
+
+
+def parse_market_window(question: str) -> dict:
+    """Extract start/end window (UTC epoch seconds) and interval length from question."""
+    m = _window_re.search(question)
+    if not m:
+        return {"ok": False}
+    year = datetime.now(timezone.utc).year
+    mon = m.group("mon")
+    day = int(m.group("day"))
+    s = _et_to_utc_epoch(mon, day, int(m.group("h1")), int(m.group("m1")), m.group("ap1"), year)
+    e = _et_to_utc_epoch(mon, day, int(m.group("h2")), int(m.group("m2")), m.group("ap2"), year)
+    if not s or not e:
+        return {"ok": False}
+    # Handle window that crosses midnight
+    if e <= s:
+        e += 24 * 3600
+    return {"ok": True, "start": s, "end": e, "interval_s": e - s}
+
+
 async def discover_15m_markets(client: httpx.AsyncClient) -> list[dict]:
-    """Discover the currently relevant rotating "Up or Down" markets.
+    """Discover rotating crypto Up/Down markets and attach parsed windows.
 
-    Reality check: The live Gamma dataset (as of 2026-02-05) does not appear to
-    expose 15-minute up/down markets with obvious "15 minute" wording.
-
-    So for now we discover via the official "Up or Down" tag and then filter
-    to crypto underlyings (BTC/ETH/SOL/XRP). If/when the 15-minute markets are
-    available, we can tighten this to a true 15-minute selector.
-
-    Returns list of dicts: {id, question, clobTokenIds, slug}
+    Returns list of dicts including: {id, question, clobTokenIds, slug, window}
     """
     url = f"{GAMMA_BASE}/events"
     params = {
@@ -259,25 +314,28 @@ async def discover_15m_markets(client: httpx.AsyncClient) -> list[dict]:
 
     markets: list[dict] = []
     for ev in events:
-        for m in ev.get("markets", []) or []:
-            q = (m.get("question") or "").strip()
+        for mkt in ev.get("markets", []) or []:
+            q = (mkt.get("question") or "").strip()
             if not q:
                 continue
             q_up = q.upper()
             if not any(a in q_up for a in ASSETS):
                 continue
-            if not m.get("clobTokenIds"):
+            if not mkt.get("clobTokenIds"):
                 continue
+
+            win = parse_market_window(q)
             markets.append({
-                "id": m.get("id"),
-                "slug": m.get("slug"),
+                "id": mkt.get("id"),
+                "slug": mkt.get("slug"),
                 "question": q,
-                "clobTokenIds": m.get("clobTokenIds"),
+                "clobTokenIds": mkt.get("clobTokenIds"),
+                "window": win,
             })
 
     # de-dupe by question
-    seen=set()
-    out=[]
+    seen = set()
+    out = []
     for mm in markets:
         if mm["question"] in seen:
             continue
@@ -374,14 +432,39 @@ async def main() -> int:
                                 st = {}
                             cd = st.get("cooldowns", {})
 
-                            # Select one "current" market per asset by choosing the soonest end_date if available.
-                            # We don't currently parse end_date here (Gamma events payload differs), so we just take the first match per asset.
-                            current = {}
+                            # Select the most relevant market per asset:
+                            # - Prefer markets whose window contains now
+                            # - Prefer TARGET_INTERVAL_S markets (15m)
+                            # - Otherwise pick the next upcoming
+                            now_s = int(time.time())
+                            per_asset: dict[str, list[dict]] = {a: [] for a in ASSETS}
                             for m in markets:
-                                q = m.get("question", "").upper()
+                                q = (m.get("question") or "").upper()
                                 for a in ASSETS:
-                                    if a in q and a not in current:
-                                        current[a] = m
+                                    if a in q:
+                                        per_asset[a].append(m)
+
+                            def score(m: dict) -> tuple:
+                                win = m.get("window") or {}
+                                ok = bool(win.get("ok"))
+                                if not ok:
+                                    return (9, 9, 9)
+                                s = int(win.get("start"))
+                                e = int(win.get("end"))
+                                interval = int(win.get("interval_s"))
+                                contains = (s <= now_s <= e)
+                                next_start = max(0, s - now_s)
+                                interval_pen = abs(interval - TARGET_INTERVAL_S)
+                                # lower is better
+                                return (0 if contains else 1, interval_pen, next_start)
+
+                            current = {}
+                            for a in ASSETS:
+                                cands = per_asset[a]
+                                if not cands:
+                                    continue
+                                cands.sort(key=score)
+                                current[a] = cands[0]
 
                             for a, m in current.items():
                                 last_t = float(cd.get(a, 0))
@@ -419,11 +502,19 @@ async def main() -> int:
                                     continue
                                 best_ask = float(asks[0]["price"] if isinstance(asks[0], dict) else asks[0][0])
 
-                                # crude probability estimate: if spot pct move over lookback is positive, assign p=0.55..0.70 based on magnitude
-                                pct = abs(float(sig.get("pct") or 0.0))
-                                p = min(0.70, 0.55 + pct * 10.0)
+                                # Probability model upgrade (still deterministic): logistic on lookback return + spread penalty
+                                # Calibrated to be conservative; tune via directives if desired.
+                                import math
+                                ret = float(sig.get("pct") or 0.0)
+                                # use signed return for direction confidence
+                                x = 12.0 * ret  # scale
+                                p_up = 1.0 / (1.0 + math.exp(-x))
+                                p = p_up if side_dir == "up" else (1.0 - p_up)
+                                # cap away from extremes
+                                p = min(0.80, max(0.20, p))
+
                                 implied = best_ask
-                                edge = (p - implied) if side_dir == "up" else (p - implied)  # same token prob model
+                                edge = p - implied
 
                                 edge_min = directives["edgeMin"]
                                 if directives.get("riskMode") == "cautious":
