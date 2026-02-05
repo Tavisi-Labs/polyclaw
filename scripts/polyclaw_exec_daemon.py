@@ -184,28 +184,38 @@ _updown_re = re.compile(r"\b(up\s+or\s+down)\b", re.IGNORECASE)
 
 
 async def discover_15m_markets(client: httpx.AsyncClient) -> list[dict]:
-    """Discover current active 15-minute up/down markets from Gamma.
+    """Discover the currently relevant rotating "Up or Down" markets.
+
+    Reality check: The live Gamma dataset (as of 2026-02-05) does not appear to
+    expose 15-minute up/down markets with obvious "15 minute" wording.
+
+    So for now we discover via the official "Up or Down" tag and then filter
+    to crypto underlyings (BTC/ETH/SOL/XRP). If/when the 15-minute markets are
+    available, we can tighten this to a true 15-minute selector.
 
     Returns list of dicts: {id, question, clobTokenIds, slug}
     """
-    # Pull active events with some cap; filter locally
-    # Gamma supports: /events?active=true&closed=false&limit=N
     url = f"{GAMMA_BASE}/events"
-    params = {"active": "true", "closed": "false", "limit": "250"}
+    params = {
+        "active": "true",
+        "closed": "false",
+        "limit": "200",
+        "tag_id": "102127",  # Up or Down
+        "order": "updatedAt",
+        "ascending": "false",
+    }
     r = await client.get(url, params=params)
     r.raise_for_status()
     events = r.json()
 
-    markets = []
+    markets: list[dict] = []
     for ev in events:
         for m in ev.get("markets", []) or []:
             q = (m.get("question") or "").strip()
             if not q:
                 continue
-            if not (_15m_re.search(q) and _updown_re.search(q)):
-                continue
-            # asset filter by keyword
-            if not any(a in q.upper() for a in ASSETS):
+            q_up = q.upper()
+            if not any(a in q_up for a in ASSETS):
                 continue
             if not m.get("clobTokenIds"):
                 continue
@@ -215,7 +225,17 @@ async def discover_15m_markets(client: httpx.AsyncClient) -> list[dict]:
                 "question": q,
                 "clobTokenIds": m.get("clobTokenIds"),
             })
-    return markets
+
+    # de-dupe by question
+    seen=set()
+    out=[]
+    for mm in markets:
+        if mm["question"] in seen:
+            continue
+        seen.add(mm["question"])
+        out.append(mm)
+
+    return out
 
 
 def write_heartbeat(payload: dict) -> None:
