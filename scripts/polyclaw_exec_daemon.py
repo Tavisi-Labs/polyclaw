@@ -663,8 +663,19 @@ async def main() -> int:
                 }
                 write_heartbeat(hb)
 
-                # state snapshot (minimal)
-                STATE_PATH.write_text(json.dumps({"ts": int(now), "markets": markets[:50]}, indent=2))
+                # state snapshot (merge with existing so we don't clobber cooldowns/decision log)
+                try:
+                    cur_state = {}
+                    if STATE_PATH.exists():
+                        cur_state = json.loads(STATE_PATH.read_text())
+                    if not isinstance(cur_state, dict):
+                        cur_state = {}
+                except Exception:
+                    cur_state = {}
+
+                cur_state["ts"] = int(now)
+                cur_state["markets"] = markets[:50]
+                STATE_PATH.write_text(json.dumps(cur_state, indent=2))
 
                 await asyncio.sleep(HEARTBEAT_INTERVAL_S)
 
