@@ -354,6 +354,48 @@ def write_heartbeat(payload: dict) -> None:
 async def main() -> int:
     stop = asyncio.Event()
 
+    # One-time startup banner (audit): write to today's memory markdown
+    try:
+        day = time.strftime("%Y-%m-%d", time.gmtime())
+        mpath = WORKSPACE_DIR / "memory" / f"{day}.md"
+        banner_flag = MEM_DIR / "polyclaw-startup-banner-written.json"
+        if not banner_flag.exists():
+            # Read balances if possible
+            bal_usdce = None
+            bal_pol = None
+            approvals = None
+            try:
+                from lib.wallet_manager import WalletManager
+                w = WalletManager()
+                if w.is_unlocked and w.rpc_url:
+                    approvals = w.check_approvals()
+                    b = w.get_balances()
+                    bal_pol = b.pol
+                    bal_usdce = b.usdc_e
+            except Exception:
+                pass
+
+            line = (
+                f"- {time.strftime('%H:%MZ', time.gmtime())} PolyClaw START: "
+                f"live={str(EXECUTION_ENABLED).lower()} "
+                f"assets={','.join(ASSETS)} "
+                f"usdc_e={('%.6f'%bal_usdce) if bal_usdce is not None else 'na'} "
+                f"pol={('%.6f'%bal_pol) if bal_pol is not None else 'na'} "
+                f"approvals={approvals if approvals is not None else 'na'}\n"
+            )
+
+            existing = mpath.read_text() if mpath.exists() else ""
+            if existing.strip() == "":
+                existing = f"# {day}\n\n## Research / Scans\n"
+            if "## Research / Scans" not in existing:
+                existing += "\n## Research / Scans\n"
+            existing += line
+            mpath.write_text(existing)
+
+            banner_flag.write_text(json.dumps({"ts": int(time.time()), "day": day}, indent=2))
+    except Exception:
+        pass
+
     def _handle(*_):
         stop.set()
 
