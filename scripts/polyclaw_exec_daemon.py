@@ -27,6 +27,25 @@ import httpx
 # Optional websocket lib (installed into venv)
 import websockets
 
+import logging
+import traceback
+
+# ----------------------------------------------------------------------------
+# Logging
+# ----------------------------------------------------------------------------
+
+LOG_PATH = Path(os.getenv(
+    "POLY_EXEC_DEBUG_LOG",
+    str((Path(os.getenv("OPENCLAW_WORKSPACE", str(Path.home() / ".openclaw/workspace"))) / "memory") / "polyclaw-exec-debug.log"),
+))
+LOG_LEVEL = os.getenv("POLY_EXEC_LOG_LEVEL", "INFO").upper()
+logging.basicConfig(
+    level=getattr(logging, LOG_LEVEL, logging.INFO),
+    format="%(asctime)sZ %(levelname)s %(message)s",
+    handlers=[logging.FileHandler(LOG_PATH), logging.StreamHandler()],
+)
+log = logging.getLogger("polyclaw-exec")
+
 # Skill root
 SKILL_DIR = Path(__file__).resolve().parent.parent
 WORKSPACE_DIR = Path(os.getenv("OPENCLAW_WORKSPACE", str(Path.home() / ".openclaw/workspace")))
@@ -452,7 +471,7 @@ async def main() -> int:
                             directives["maxTradeFraction"] = float(dj.get("maxTradeFraction", directives["maxTradeFraction"]))
                             directives["maxMarketFraction"] = float(dj.get("maxMarketFraction", directives["maxMarketFraction"]))
                     except Exception:
-                        pass
+                        log.exception("failed to load strategy-directives")
 
                     if directives.get("riskMode") == "halted":
                         last_poly_update = now
