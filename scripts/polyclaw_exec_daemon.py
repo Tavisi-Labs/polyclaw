@@ -63,6 +63,9 @@ MAX_TRADE_FRACTION_DEFAULT = float(os.getenv("RISK_MAX_TRADE_FRACTION", "0.20"))
 MAX_MARKET_FRACTION_DEFAULT = float(os.getenv("RISK_MAX_MARKET_FRACTION", "0.35"))
 COOLDOWN_S_DEFAULT = int(os.getenv("RISK_COOLDOWN_S", "45"))
 
+# Decision logging
+DECISION_LOG_INTERVAL_S = int(os.getenv("POLY_DECISION_LOG_INTERVAL_S", "300"))  # 5 minutes
+
 
 @dataclass
 class VenuePrice:
@@ -469,7 +472,7 @@ async def main() -> int:
                             else:
                                 clob = ClobClientWrapper(wallet.get_unlocked_key(), wallet.address)
 
-                            # simple per-asset cooldown state
+                            # simple per-asset cooldown + decision log state
                             st = {}
                             try:
                                 if STATE_PATH.exists():
@@ -477,6 +480,7 @@ async def main() -> int:
                             except Exception:
                                 st = {}
                             cd = st.get("cooldowns", {})
+                            last_dec = st.get("lastDecisionLog", {})
 
                             # Select the most relevant market per asset:
                             # - Prefer markets whose window contains now
@@ -565,6 +569,36 @@ async def main() -> int:
                                 edge_min = directives["edgeMin"]
                                 if directives.get("riskMode") == "cautious":
                                     edge_min = max(edge_min, 0.10)
+
+                                # Periodic decision log (even if we don't trade)
+                                try:
+                                    last_tlog = float(last_dec.get(a, 0))
+                                except Exception:
+                                    last_tlog = 0.0
+                                if now - last_tlog >= DECISION_LOG_INTERVAL_S:
+                                    try:
+                                        day = time.strftime("%Y-%m-%d", time.gmtime())
+                                        mpath = WORKSPACE_DIR / "memory" / f"{day}.md"
+                                        line = (
+                                            f"- {time.strftime('%H:%MZ', time.gmtime())} PolyClaw decision: asset={a} "
+                                            f"dir={side_dir} ret={ret:+.5f} p={p:.2f} implied={implied:.2f} "
+                                            f"edge={edge:.2f} edgeMin={edge_min:.2f} "
+                                            f"window={((m.get('window') or {}).get('interval_s'))}s "
+                                            f"token={'YES' if side_dir=='up' else 'NO'}\n"
+                                        )
+                                        txt = mpath.read_text() if mpath.exists() else f"# {day}\n\n## Research / Scans\n"
+                                        if "## Research / Scans" not in txt:
+                                            txt += "\n## Research / Scans\n"
+                                        txt += line
+                                        mpath.write_text(txt)
+                                    except Exception:
+                                        pass
+                                    last_dec[a] = now
+                                    st["lastDecisionLog"] = last_dec
+                                    try:
+                                        STATE_PATH.write_text(json.dumps(st, indent=2))
+                                    except Exception:
+                                        pass
 
                                 if edge < edge_min:
                                     continue
