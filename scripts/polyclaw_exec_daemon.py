@@ -421,7 +421,11 @@ async def main() -> int:
                             # Can't trade without wallet
                             last_poly_update = now
                         else:
-                            clob = ClobClientWrapper(wallet.get_unlocked_key(), wallet.address)
+                            # Ensure we have an RPC URL for on-chain steps (split/approvals/balances)
+                            if not wallet.rpc_url:
+                                last_poly_update = now
+                            else:
+                                clob = ClobClientWrapper(wallet.get_unlocked_key(), wallet.address)
 
                             # simple per-asset cooldown state
                             st = {}
